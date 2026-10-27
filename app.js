@@ -9,6 +9,7 @@
 const $ = s => document.querySelector(s);
 const FOLIO_KEY = 'bandera513-folio';
 const LOCALIDAD_KEY = 'bandera513-localidad'; // última localidad usada, para no reescribirla
+const CATALOGO_KEY = 'bandera513-localidades'; // catálogo de Localidades de Shop Car, para usarlo sin señal
 const MAX_LADO = 1600;              // px del lado mayor de la foto guardada
 const ANTIGUEDAD_MAX_MS = 10 * 60e3; // una foto más vieja que esto no se considera tomada en el momento
 
@@ -107,6 +108,23 @@ async function iniciarSesion(usuario, password) {
     await guardar(r);
   }
 }
+// Las localidades salen del catálogo de Shop Car. Se guarda una copia para poder elegir sin señal.
+async function cargarLocalidades() {
+  if (sesion && navigator.onLine) {
+    try {
+      const r = await api('/rest/v1/localidades?select=id,nombre&order=nombre');
+      if (r.ok) localStorage.setItem(CATALOGO_KEY, JSON.stringify(await r.json()));
+    } catch { /* sin señal: se usa la copia guardada */ }
+  }
+  let lista = [];
+  try { lista = JSON.parse(localStorage.getItem(CATALOGO_KEY)) || []; } catch { /* sin copia */ }
+  const sel = $('#cLocalidad'), actual = sel.value;
+  sel.innerHTML = '<option value="">Elige la localidad…</option>' +
+    lista.map(l => `<option value="${esc(l.nombre)}" data-id="${l.id}">${esc(l.nombre)}</option>`).join('');
+  sel.value = actual;
+}
+const localidadIdElegida = () => Number($('#cLocalidad').selectedOptions[0]?.dataset.id) || null;
+
 function cerrarSesion() {
   sesion = null;
   localStorage.removeItem(SESION_KEY);
@@ -154,7 +172,7 @@ async function enviarRegistro(r) {
       method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
       body: JSON.stringify({
         id: r.remotoId, folio: r.folio, responsable: colocoDe(r), ficha: r.colocacion.ficha || null,
-        empresa: r.empresa || null, localidad: r.localidad || r.ubicacion,
+        empresa: r.empresa || null, localidad: r.localidad || r.ubicacion, localidad_id: r.localidadId ?? null,
         via: viejo ? null : r.via, equipo: viejo ? null : (r.equipo || null),
         via_equipo: viejo ? ((r.localidad && r.ubicacion) || null) : null,
         observaciones: r.obs || null, colocada_at: new Date(r.colocacion.ms).toISOString(),
@@ -245,6 +263,7 @@ $('#formLogin').addEventListener('submit', async e => {
     await iniciarSesion($('#lUsuario').value, $('#lPassword').value);
     $('#lPassword').value = '';
     mostrarLogin();
+    await cargarLocalidades();
     document.querySelector('[data-vista="activas"]').click();
     avisar(`Bienvenido, ${sesion.nombre}.`);
     await pintar(); sincronizar();
@@ -404,7 +423,7 @@ function abrirCaptura(tipo, registro) {
     $('#capTitulo').textContent = 'Colocar bandera';
     $('#capDatos').hidden = false; $('#capResumen').hidden = true;
     ['#cLocalidad', '#cVia', '#cColoco'].forEach(s => $(s).required = true);
-    $('#cLocalidad').value = localStorage.getItem(LOCALIDAD_KEY) || '';
+    $('#cLocalidad').value = localStorage.getItem(LOCALIDAD_KEY) || ''; // si ya no está en el catálogo, queda sin elegir
     $('#cColoco').value = sesion?.nombre || '';
     $('#lblFoto span').textContent = '📷 Tomar foto de la bandera colocada';
   } else {
@@ -480,7 +499,8 @@ $('#btnGuardar').addEventListener('click', async () => {
     // Pudieron colocar otra en la misma vía mientras se tomaba la foto.
     if ((await revisarVia()).estado === 'bloqueada') { $('#capBloqueo').scrollIntoView({ behavior: 'smooth' }); return; }
     await guardar({
-      id: captura.folio, folio: captura.folio, localidad: $('#cLocalidad').value.trim(), via: $('#cVia').value.trim(),
+      id: captura.folio, folio: captura.folio, localidad: $('#cLocalidad').value.trim(), localidadId: localidadIdElegida(),
+      via: $('#cVia').value.trim(),
       equipo: $('#cEquipo').value.trim(), coloco: $('#cColoco').value.trim(), obs: $('#cObs').value.trim(),
       colocacion: { ms: captura.ms, foto: captura.blob, gps: captura.gps, responsable: sesion.nombre },
       retiro: null, cierre: null,
@@ -573,7 +593,6 @@ async function pintar() {
     : '<p class="vacio">Aún no hay banderas retiradas en este periodo.</p>';
 
   const opciones = valores => [...new Set(valores.filter(Boolean))].slice(0, 30).map(u => `<option value="${esc(u)}">`).join('');
-  $('#localidadesUsadas').innerHTML = opciones(registros.map(r => r.localidad));
   $('#viasUsadas').innerHTML = opciones(registros.map(r => r.via));
   $('#personasUsadas').innerHTML = opciones([sesion?.nombre, ...registros.map(r => r.coloco)]);
 
@@ -697,6 +716,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
   navigator.storage?.persist?.();
   localStorage.removeItem('bandera513-ajustes'); // la pantalla de Ajustes ya no existe
   mostrarLogin();
+  await cargarLocalidades();
   await pintar();
   sincronizar();
 })();

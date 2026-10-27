@@ -45,7 +45,7 @@ h2 { font-size: 17px; margin: 0 0 12px; }
 }
 label { display: block; font-size: 14px; color: var(--tenue); margin-bottom: 12px; }
 label.check { display: flex; align-items: center; gap: 8px; color: var(--texto); }
-input, textarea {
+input, textarea, select {
   display: block; width: 100%; margin-top: 4px; padding: 11px 12px; font: inherit; color: var(--texto);
   border: 1px solid var(--borde); border-radius: 10px; background: #fff;
 }
