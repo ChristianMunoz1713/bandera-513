@@ -1,6 +1,8 @@
 // Bandera de Seguridad · Regla 5.13
 // Registra colocación y retiro de la bandera con foto tomada en el momento (marca de agua incrustada)
-// y cuenta el tiempo que la bandera permanece colocada. Todo se guarda en este dispositivo (IndexedDB).
+// y cuenta el tiempo que la bandera permanece colocada. Cada registro se guarda primero en este
+// dispositivo (IndexedDB) y luego se envía a Shop Car a nombre del usuario que inició sesión; si no
+// hay señal queda pendiente y se reintenta solo.
 
 const $ = s => document.querySelector(s);
 const AJUSTES_KEY = 'bandera513-ajustes';
@@ -65,6 +67,161 @@ function obtenerGPS() {
     p => ok({ lat: p.coords.latitude, lon: p.coords.longitude, prec: Math.round(p.coords.accuracy) }),
     () => ok(null), { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }));
 }
+
+// ---------- Shop Car: sesión y envío ----------
+const SESION_KEY = 'bandera513-sesion';
+const BUCKET = 'banderas-fotos';
+let sesion = (() => { try { return JSON.parse(localStorage.getItem(SESION_KEY)); } catch { return null; } })();
+
+function guardarSesion(j, usuario) {
+  sesion = {
+    token: j.access_token, refresh: j.refresh_token, expira: Date.now() + j.expires_in * 1000,
+    usuarioId: j.user.id, usuario: usuario ?? sesion?.usuario, nombre: sesion?.nombre,
+  };
+  localStorage.setItem(SESION_KEY, JSON.stringify(sesion));
+}
+async function pedirToken(tipo, cuerpo) {
+  const r = await fetch(`${SHOPCAR.url}/auth/v1/token?grant_type=${tipo}`, {
+    method: 'POST', headers: { apikey: SHOPCAR.anonKey, 'Content-Type': 'application/json' }, body: JSON.stringify(cuerpo),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(j.error_description || j.msg || 'No se pudo iniciar sesión'), { status: r.status });
+  return j;
+}
+// Mismo criterio que el login de Shop Car: sin "@" se arma el correo interno <usuario>@shopcar.local.
+async function iniciarSesion(usuario, password) {
+  const email = usuario.includes('@') ? usuario.trim() : `${usuario.trim().toLowerCase()}@shopcar.local`;
+  guardarSesion(await pedirToken('password', { email, password }), usuario.trim());
+  const r = await api(`/rest/v1/usuario_perfil?select=nombre_completo&usuario_id=eq.${sesion.usuarioId}`);
+  const perfil = r.ok ? (await r.json())[0] : null;
+  sesion.nombre = perfil?.nombre_completo || sesion.usuario;
+  localStorage.setItem(SESION_KEY, JSON.stringify(sesion));
+  // El nombre de Shop Car es el que va en la marca de agua.
+  const a = ajustes();
+  localStorage.setItem(AJUSTES_KEY, JSON.stringify({ ...a, responsable: sesion.nombre }));
+}
+function cerrarSesion() {
+  sesion = null;
+  localStorage.removeItem(SESION_KEY);
+  mostrarLogin();
+}
+async function token() {
+  if (!sesion) throw new Error('Sin sesión');
+  if (sesion.expira - 60e3 > Date.now()) return sesion.token;
+  try {
+    guardarSesion(await pedirToken('refresh_token', { refresh_token: sesion.refresh }));
+  } catch (err) {
+    // Un refresh rechazado (no un fallo de red) significa que la sesión ya no vale.
+    if (err.status >= 400 && err.status < 500) { cerrarSesion(); avisar('Tu sesión expiró. Vuelve a entrar.', 5000); }
+    throw err;
+  }
+  return sesion.token;
+}
+async function api(ruta, opciones = {}) {
+  const t = await token();
+  return fetch(SHOPCAR.url + ruta, { ...opciones, headers: { apikey: SHOPCAR.anonKey, Authorization: `Bearer ${t}`, ...opciones.headers } });
+}
+async function subirFoto(ruta, blob) {
+  const r = await api(`/storage/v1/object/${BUCKET}/${ruta}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
+  if (r.ok) return;
+  const j = await r.json().catch(() => ({}));
+  // Ya estaba subida (un envío anterior que se cortó a la mitad).
+  if (r.status === 409 || String(j.statusCode) === '409' || /duplicate|already exists/i.test(j.message || j.error || '')) return;
+  throw new Error(j.message || j.error || `Error ${r.status} al subir la foto`);
+}
+const gpsCampos = (pre, g) => ({ [`${pre}_lat`]: g?.lat ?? null, [`${pre}_lon`]: g?.lon ?? null, [`${pre}_precision_m`]: g?.prec ?? null });
+const pendiente = r => r.usuarioId && (!r.enviado?.colocacion || (r.retiro && !r.enviado?.retiro));
+
+async function enviarRegistro(r) {
+  const carpeta = r.usuarioId;
+  if (!r.enviado.colocacion) {
+    const ruta = `${carpeta}/${r.remotoId}_colocacion.jpg`;
+    await subirFoto(ruta, r.colocacion.foto);
+    const res = await api('/rest/v1/banderas_azules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        id: r.remotoId, folio: r.folio, responsable: r.colocacion.responsable || 'Sin nombre', ficha: r.colocacion.ficha || null,
+        empresa: r.empresa || null, localidad: r.localidad || r.ubicacion, via_equipo: (r.localidad && r.ubicacion) || null,
+        observaciones: r.obs || null, colocada_at: new Date(r.colocacion.ms).toISOString(),
+        ...gpsCampos('colocada', r.colocacion.gps), foto_colocacion: ruta,
+      }),
+    });
+    // 409 = ya existía (se había enviado y no llegó la respuesta).
+    if (!res.ok && res.status !== 409) throw new Error((await res.json().catch(() => ({}))).message || `Error ${res.status}`);
+    r.enviado.colocacion = true;
+    await guardar(r);
+  }
+  if (r.retiro && !r.enviado.retiro) {
+    const ruta = `${sesion.usuarioId}/${r.remotoId}_retiro.jpg`;
+    await subirFoto(ruta, r.retiro.foto);
+    const res = await api(`/rest/v1/banderas_azules?id=eq.${r.remotoId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+      body: JSON.stringify({
+        retirada_at: new Date(r.retiro.ms).toISOString(), retirada_responsable: r.retiro.responsable || 'Sin nombre',
+        ...gpsCampos('retirada', r.retiro.gps), foto_retiro: ruta,
+      }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      // Ya estaba registrada como retirada (otro intento sí llegó, o la retiró un supervisor).
+      if (!/ya se registró como retirada/.test(j.message || '')) throw new Error(j.message || `Error ${res.status}`);
+    }
+    r.enviado.retiro = true;
+    await guardar(r);
+  }
+}
+
+let enviando = false;
+async function sincronizar(manual = false) {
+  if (enviando || !sesion || !SHOPCAR.url) return;
+  enviando = true;
+  let error = null;
+  try {
+    for (const r of await todos()) {
+      if (r.usuarioId !== sesion.usuarioId || !pendiente(r)) continue;
+      try { await enviarRegistro(r); } catch (err) { error = err; if (!sesion) break; }
+    }
+  } finally {
+    enviando = false;
+  }
+  await pintar();
+  if (manual) avisar(error ? `No se pudo enviar todo: ${error.message}` : 'Todo está enviado a Shop Car.', 4000);
+}
+setInterval(sincronizar, 60e3);
+window.addEventListener('online', () => sincronizar());
+
+function mostrarLogin() {
+  const sinSesion = !sesion;
+  $('#vista-login').hidden = !sinSesion;
+  document.querySelector('.pestanas').hidden = sinSesion;
+  document.querySelector('main').hidden = sinSesion;
+  if (sinSesion) {
+    $('#estadoEnvio').hidden = true;
+    $('#loginError').hidden = true;
+    if (!SHOPCAR.url) { $('#loginError').textContent = 'La conexión con Shop Car aún no está configurada.'; $('#loginError').hidden = false; }
+  }
+}
+$('#formLogin').addEventListener('submit', async e => {
+  e.preventDefault();
+  $('#btnEntrar').disabled = true; $('#loginError').hidden = true;
+  try {
+    await iniciarSesion($('#lUsuario').value, $('#lPassword').value);
+    $('#lPassword').value = '';
+    mostrarLogin(); cargarAjustes();
+    document.querySelector('[data-vista="activas"]').click();
+    avisar(`Bienvenido, ${sesion.nombre}.`);
+    await pintar(); sincronizar();
+  } catch (err) {
+    $('#loginError').textContent = /invalid/i.test(err.message) ? 'Usuario o contraseña incorrectos.' : err.message;
+    $('#loginError').hidden = false;
+  } finally { $('#btnEntrar').disabled = false; }
+});
+$('#btnSalir').addEventListener('click', async () => {
+  const n = (await todos()).filter(r => r.usuarioId === sesion?.usuarioId && pendiente(r)).length;
+  if (n && !confirm(`Tienes ${n} registro(s) sin enviar a Shop Car. Se enviarán cuando vuelvas a entrar con este usuario. ¿Cerrar sesión?`)) return;
+  cerrarSesion();
+});
+$('#btnEnviar').addEventListener('click', () => sincronizar(true));
 
 // ---------- Marca de agua ----------
 async function fotoConMarca(archivo, info) {
@@ -195,6 +352,7 @@ $('#btnGuardar').addEventListener('click', async () => {
     await guardar({
       id: captura.folio, folio: captura.folio, localidad: $('#cLocalidad').value.trim(), ubicacion: $('#cUbicacion').value.trim(),
       obs: $('#cObs').value.trim(), empresa: a.empresa, colocacion: evento, retiro: null,
+      remotoId: crypto.randomUUID(), usuarioId: sesion.usuarioId, enviado: { colocacion: false, retiro: false },
     });
     localStorage.setItem(LOCALIDAD_KEY, $('#cLocalidad').value.trim());
     avisar('Bandera registrada como colocada. El tiempo empieza a contar.');
@@ -207,7 +365,8 @@ $('#btnGuardar').addEventListener('click', async () => {
   }
   captura = null;
   $('#dlgCaptura').close();
-  pintar();
+  await pintar();
+  sincronizar();
 });
 $('#btnCancelar').addEventListener('click', () => { captura = null; $('#dlgCaptura').close(); });
 
@@ -220,12 +379,17 @@ function urlFoto(r, tipo) {
   return urls.get(k);
 }
 
+function etiquetaEnvio(r) {
+  if (!r.usuarioId) return '<span class="envio">Solo en este teléfono</span>';
+  return pendiente(r) ? '<span class="envio">⏳ Pendiente de enviar a Shop Car</span>' : '<span class="envio ok">✓ Enviado a Shop Car</span>';
+}
+
 function tarjetaActiva(r) {
   return `<div class="tarjeta bandera" data-id="${esc(r.id)}">
     <div class="cab"><h3>${esc(lugar(r))}</h3><span class="folio">${esc(r.folio)}</span></div>
     <div class="cronometro" data-desde="${r.colocacion.ms}">${duracion(Date.now() - r.colocacion.ms)}</div>
     <div class="meta">Colocada ${fechaHora(r.colocacion.ms)} · ${esc(r.colocacion.responsable || 'Sin nombre')}
-      ${r.obs ? `<br>${esc(r.obs)}` : ''}</div>
+      ${r.obs ? `<br>${esc(r.obs)}` : ''}<br>${etiquetaEnvio(r)}</div>
     <div class="fotos"><figure><img src="${urlFoto(r, 'colocacion')}" data-foto="${esc(r.id)}|colocacion" alt="Foto de colocación"><figcaption>Colocación</figcaption></figure></div>
     <button class="btn-retirar" data-retirar="${esc(r.id)}">Retirar bandera</button>
   </div>`;
@@ -237,13 +401,13 @@ function tarjetaHistorial(r) {
       Colocada: ${fechaHora(r.colocacion.ms)} · ${esc(r.colocacion.responsable || '—')}<br>
       Retirada: ${fechaHora(r.retiro.ms)} · ${esc(r.retiro.responsable || '—')}<br>
       Tiempo colocada: <span class="duracion">${duracion(r.duracionMs)}</span>
-      ${r.obs ? `<br>${esc(r.obs)}` : ''}
+      ${r.obs ? `<br>${esc(r.obs)}` : ''}<br>${etiquetaEnvio(r)}
     </div>
     <div class="fotos">
       <figure><img src="${urlFoto(r, 'colocacion')}" data-foto="${esc(r.id)}|colocacion" alt="Foto de colocación"><figcaption>Colocación</figcaption></figure>
       <figure><img src="${urlFoto(r, 'retiro')}" data-foto="${esc(r.id)}|retiro" alt="Foto de retiro"><figcaption>Retiro</figcaption></figure>
     </div>
-    <button class="borrar" data-borrar="${esc(r.id)}">Eliminar registro</button>
+    ${pendiente(r) ? '' : `<button class="borrar" data-borrar="${esc(r.id)}">Quitar de este teléfono</button>`}
   </div>`;
 }
 
@@ -273,6 +437,17 @@ async function pintar() {
     .map(u => `<option value="${esc(u)}">`).join('');
   $('#localidadesUsadas').innerHTML = opciones('localidad');
   $('#ubicacionesUsadas').innerHTML = opciones('ubicacion');
+
+  if (sesion) {
+    const pendientes = registros.filter(r => r.usuarioId === sesion.usuarioId && pendiente(r)).length;
+    const e = $('#estadoEnvio');
+    e.hidden = false;
+    e.classList.toggle('ok', !pendientes);
+    e.textContent = pendientes
+      ? `⏳ ${pendientes} registro(s) pendientes de enviar a Shop Car${navigator.onLine ? '' : ' (sin conexión)'}`
+      : `✓ ${sesion.nombre} · todo enviado a Shop Car`;
+    $('#infoSesion').textContent = `${sesion.nombre} (${sesion.usuario}) · ${pendientes} pendiente(s) de enviar.`;
+  }
   tic();
 }
 
@@ -304,7 +479,8 @@ document.addEventListener('click', async e => {
   else if (t.dataset.foto) verFoto(...t.dataset.foto.split('|'));
   else if (t.dataset.borrar) {
     const r = registros.find(x => x.id === t.dataset.borrar);
-    if (confirm(`¿Eliminar el registro ${r.folio} (${lugar(r)}) y sus fotos? No se puede deshacer.`)) {
+    const aviso = r.usuarioId ? ' En Shop Car el registro se conserva.' : ' No se puede deshacer.';
+    if (confirm(`¿Quitar de este teléfono el registro ${r.folio} (${lugar(r)}) y sus fotos?${aviso}`)) {
       await borrar(r.id);
       ['colocacion', 'retiro'].forEach(k => { URL.revokeObjectURL(urls.get(r.id + k)); urls.delete(r.id + k); });
       pintar();
@@ -427,9 +603,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
   await abrirDB();
   navigator.storage?.persist?.();
   cargarAjustes();
+  mostrarLogin();
   await pintar();
-  if (!ajustes().responsable) {
-    document.querySelector('[data-vista="ajustes"]').click();
-    avisar('Bienvenido. Captura tu nombre para la marca de agua.', 4500);
-  }
+  sincronizar();
 })();

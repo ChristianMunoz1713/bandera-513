@@ -108,6 +108,14 @@ dialog::backdrop { background: rgba(10, 20, 40, .6); }
 .resumen-retiro { background: var(--fondo); border-radius: 10px; padding: 10px; margin-bottom: 12px; font-size: 14px; line-height: 1.6; }
 .visor { padding: 10px; width: min(900px, calc(100vw - 16px)); }
 .visor img { width: 100%; display: block; border-radius: 8px; }
+.login { max-width: 480px; margin: 24px auto; padding: 0 16px; }
+.error { color: var(--rojo); font-size: 14px; }
+.estado-envio {
+  margin: 0; padding: 8px 16px; font-size: 13px; background: #fff4e0; color: var(--ambar); text-align: center;
+}
+.estado-envio.ok { background: #e6f4ee; color: var(--verde); }
+.envio { display: inline-block; margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--ambar); }
+.envio.ok { color: var(--verde); }
 .aviso {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #1d2a44; color: #fff;
   padding: 10px 16px; border-radius: 10px; z-index: 20; max-width: calc(100vw - 32px); font-size: 14px;

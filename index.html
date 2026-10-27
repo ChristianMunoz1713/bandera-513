@@ -22,6 +22,23 @@
     <button id="btnInstalar" class="btn-chico" hidden>Instalar</button>
   </header>
 
+  <section id="vista-login" class="login" hidden>
+    <form id="formLogin" class="tarjeta">
+      <h2>Inicia sesión con tu usuario de Shop Car</h2>
+      <p class="nota">Tus reportes de colocación y retiro se envían a Shop Car a tu nombre.</p>
+      <label>Usuario
+        <input id="lUsuario" required autocomplete="username" autocapitalize="none" placeholder="usuario o correo">
+      </label>
+      <label>Contraseña
+        <input id="lPassword" type="password" required autocomplete="current-password">
+      </label>
+      <button class="btn-prim" type="submit" id="btnEntrar">Entrar</button>
+      <p id="loginError" class="error" hidden></p>
+    </form>
+  </section>
+
+  <p id="estadoEnvio" class="estado-envio" hidden></p>
+
   <nav class="pestanas">
     <button data-vista="activas" class="activa">Colocadas <span id="numActivas" class="burbuja">0</span></button>
     <button data-vista="historial">Historial</button>
@@ -49,6 +66,14 @@
     </section>
 
     <section id="vista-ajustes" class="vista" hidden>
+      <div class="tarjeta">
+        <h2>Sesión de Shop Car</h2>
+        <p id="infoSesion" class="nota"></p>
+        <div class="acciones-fila">
+          <button id="btnEnviar" class="btn-sec">Enviar pendientes</button>
+          <button id="btnSalir" class="btn-sec">Cerrar sesión</button>
+        </div>
+      </div>
       <form id="formAjustes" class="tarjeta">
         <h2>Datos que aparecen en la marca de agua</h2>
         <label>Responsable (nombre)
@@ -123,6 +148,7 @@
   </dialog>
 
   <div id="aviso" class="aviso" hidden></div>
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
