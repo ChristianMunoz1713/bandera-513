@@ -1,0 +1,17 @@
+{
+  "name": "Bandera de Seguridad · Regla 5.13",
+  "short_name": "Bandera 5.13",
+  "description": "Reporte con foto de colocación y retiro de la bandera de seguridad (Regla 5.13) y control del tiempo colocada.",
+  "lang": "es-MX",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f2a5c",
+  "theme_color": "#0f2a5c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="es-MX">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0f2a5c">
+  <title>Bandera 5.13</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="barra">
+    <div class="titulo">
+      <img src="icons/icon-192.png" alt="" width="36" height="36">
+      <div>
+        <h1>Bandera de Seguridad</h1>
+        <small>Regla 5.13 · Colocación y retiro</small>
+      </div>
+    </div>
+    <button id="btnInstalar" class="btn-chico" hidden>Instalar</button>
+  </header>
+
+  <nav class="pestanas">
+    <button data-vista="activas" class="activa">Colocadas <span id="numActivas" class="burbuja">0</span></button>
+    <button data-vista="historial">Historial</button>
+    <button data-vista="ajustes">Ajustes</button>
+  </nav>
+
+  <main>
+    <section id="vista-activas" class="vista">
+      <button id="btnColocar" class="btn-grande">
+        <span class="icono">⚑</span> Colocar bandera
+      </button>
+      <div id="listaActivas"></div>
+    </section>
+
+    <section id="vista-historial" class="vista" hidden>
+      <div class="filtros">
+        <label>Desde <input type="date" id="fDesde"></label>
+        <label>Hasta <input type="date" id="fHasta"></label>
+      </div>
+      <div id="resumen" class="resumen"></div>
+      <div class="acciones-fila">
+        <button id="btnCsv" class="btn-sec">Exportar a Excel (CSV)</button>
+      </div>
+      <div id="listaHistorial"></div>
+    </section>
+
+    <section id="vista-ajustes" class="vista" hidden>
+      <form id="formAjustes" class="tarjeta">
+        <h2>Datos que aparecen en la marca de agua</h2>
+        <label>Responsable (nombre)
+          <input id="aResponsable" required autocomplete="name" placeholder="Nombre y apellido">
+        </label>
+        <label>No. de empleado / ficha
+          <input id="aFicha" placeholder="Opcional">
+        </label>
+        <label>Empresa / área
+          <input id="aEmpresa" placeholder="Opcional">
+        </label>
+        <label class="check"><input type="checkbox" id="aGps" checked> Agregar ubicación GPS a la foto</label>
+        <label>Avisar cuando una bandera lleve más de (horas)
+          <input id="aAlerta" type="number" min="0" step="0.5" placeholder="0 = sin aviso">
+        </label>
+        <button class="btn-prim" type="submit">Guardar ajustes</button>
+      </form>
+      <div class="tarjeta">
+        <h2>Respaldo</h2>
+        <p class="nota">Los reportes y fotos se guardan solo en este teléfono. Haz un respaldo de vez en cuando.</p>
+        <div class="acciones-fila">
+          <button id="btnRespaldo" class="btn-sec">Descargar respaldo</button>
+          <label class="btn-sec">Restaurar respaldo<input type="file" id="inRestaurar" accept=".json,application/json" hidden></label>
+        </div>
+        <p id="espacio" class="nota"></p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Captura de colocación / retiro -->
+  <dialog id="dlgCaptura">
+    <form id="formCaptura" method="dialog">
+      <h2 id="capTitulo">Colocar bandera</h2>
+      <div id="capDatos">
+        <label>Ubicación / vía / equipo protegido
+          <input id="cUbicacion" required placeholder="Ej. Vía 3, carro GMX 12345" list="ubicacionesUsadas">
+          <datalist id="ubicacionesUsadas"></datalist>
+        </label>
+        <label>Observaciones
+          <textarea id="cObs" rows="2" placeholder="Opcional"></textarea>
+        </label>
+      </div>
+      <div id="capResumen" class="resumen-retiro" hidden></div>
+
+      <label class="btn-foto" id="lblFoto">
+        <span>📷 Tomar foto</span>
+        <input type="file" id="cFoto" accept="image/*" capture="environment" hidden>
+      </label>
+      <p id="capEstado" class="nota"></p>
+      <img id="capVista" alt="Vista previa con marca de agua" hidden>
+
+      <div class="acciones-fila fin">
+        <button type="button" id="btnCancelar" class="btn-sec">Cancelar</button>
+        <button type="button" id="btnGuardar" class="btn-prim" disabled>Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Visor de fotos -->
+  <dialog id="dlgFoto" class="visor">
+    <img id="visorImg" alt="Foto del reporte">
+    <div class="acciones-fila fin">
+      <button id="btnCompartir" class="btn-sec">Compartir</button>
+      <button id="btnDescargar" class="btn-sec">Descargar</button>
+      <button id="btnCerrarFoto" class="btn-prim">Cerrar</button>
+    </div>
+  </dialog>
+
+  <div id="aviso" class="aviso" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>
