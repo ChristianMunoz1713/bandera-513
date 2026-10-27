@@ -99,6 +99,13 @@ async function iniciarSesion(usuario, password) {
   // El nombre de Shop Car es el que va en la marca de agua.
   const a = ajustes();
   localStorage.setItem(AJUSTES_KEY, JSON.stringify({ ...a, responsable: sesion.nombre }));
+  // Los reportes hechos antes de existir el inicio de sesión no tienen dueño: se envían
+  // a nombre del primer usuario que entre en este teléfono.
+  for (const r of await todos()) {
+    if (r.usuarioId) continue;
+    Object.assign(r, { remotoId: crypto.randomUUID(), usuarioId: sesion.usuarioId, enviado: { colocacion: false, retiro: false } });
+    await guardar(r);
+  }
 }
 function cerrarSesion() {
   sesion = null;
