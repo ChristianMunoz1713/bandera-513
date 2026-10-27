@@ -83,10 +83,15 @@
     <form id="formCaptura" method="dialog">
       <h2 id="capTitulo">Colocar bandera</h2>
       <div id="capDatos">
-        <label>Ubicación / vía / equipo protegido
-          <input id="cUbicacion" required placeholder="Ej. Vía 3, carro GMX 12345" list="ubicacionesUsadas">
+        <label>Localidad donde se coloca la bandera
+          <input id="cLocalidad" required placeholder="Ej. Patio Valle de México" list="localidadesUsadas" autocomplete="off">
+          <datalist id="localidadesUsadas"></datalist>
+        </label>
+        <label>Vía / equipo protegido
+          <input id="cUbicacion" placeholder="Ej. Vía 3, carro GMX 12345" list="ubicacionesUsadas" autocomplete="off">
           <datalist id="ubicacionesUsadas"></datalist>
         </label>
+        <p class="nota">La fecha, la hora y la ubicación GPS se agregan solas a la foto.</p>
         <label>Observaciones
           <textarea id="cObs" rows="2" placeholder="Opcional"></textarea>
         </label>

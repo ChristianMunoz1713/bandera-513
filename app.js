@@ -5,6 +5,7 @@
 const $ = s => document.querySelector(s);
 const AJUSTES_KEY = 'bandera513-ajustes';
 const FOLIO_KEY = 'bandera513-folio';
+const LOCALIDAD_KEY = 'bandera513-localidad'; // última localidad usada, para no reescribirla
 const MAX_LADO = 1600;              // px del lado mayor de la foto guardada
 const ANTIGUEDAD_MAX_MS = 10 * 60e3; // una foto más vieja que esto no se considera tomada en el momento
 
@@ -45,6 +46,8 @@ function duracion(ms) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return (d ? `${d} d ` : '') + `${dos(h)}:${dos(m)}:${dos(s % 60)}`;
 }
+// Título del lugar: localidad y, si se capturó, la vía o equipo (los registros antiguos solo tienen ubicación)
+const lugar = r => [r.localidad, r.ubicacion].filter(Boolean).join(' · ');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function avisar(txt, ms = 3200) {
   const a = $('#aviso'); a.textContent = txt; a.hidden = false;
@@ -92,7 +95,8 @@ async function fotoConMarca(archivo, info) {
   const lineas = [
     [`${info.tipo === 'colocacion' ? 'COLOCACIÓN' : 'RETIRO'} DE BANDERA · REGLA 5.13`, true],
     [`Fecha y hora: ${fechaHora(info.ms)}`],
-    [`Ubicación: ${info.ubicacion}`],
+    [`Localidad: ${info.localidad}`],
+    ...(info.ubicacion ? [[`Vía / equipo: ${info.ubicacion}`]] : []),
     [`Responsable: ${info.responsable}${info.ficha ? ' · Ficha ' + info.ficha : ''}`],
   ];
   if (info.empresa) lineas.push([info.empresa]);
@@ -129,13 +133,14 @@ function abrirCaptura(tipo, registro) {
   if (tipo === 'colocacion') {
     $('#capTitulo').textContent = 'Colocar bandera';
     $('#capDatos').hidden = false; $('#capResumen').hidden = true;
-    $('#cUbicacion').required = true;
+    $('#cLocalidad').required = true;
+    $('#cLocalidad').value = localStorage.getItem(LOCALIDAD_KEY) || '';
     $('#lblFoto span').textContent = '📷 Tomar foto de la bandera colocada';
   } else {
     $('#capTitulo').textContent = 'Retirar bandera';
     $('#capDatos').hidden = true; $('#capResumen').hidden = false;
-    $('#cUbicacion').required = false;
-    $('#capResumen').innerHTML = `<b>${esc(registro.ubicacion)}</b><br>Colocada: ${fechaHora(registro.colocacion.ms)}<br>
+    $('#cLocalidad').required = false;
+    $('#capResumen').innerHTML = `<b>${esc(lugar(registro))}</b><br>Colocada: ${fechaHora(registro.colocacion.ms)}<br>
       Folio: ${esc(registro.folio)}<br>Tiempo colocada: <b id="capTiempo" data-desde="${registro.colocacion.ms}">${duracion(Date.now() - registro.colocacion.ms)}</b>`;
     $('#lblFoto span').textContent = '📷 Tomar foto del retiro';
   }
@@ -147,8 +152,8 @@ $('#cFoto').addEventListener('change', async e => {
   const archivo = e.target.files[0];
   e.target.value = '';
   if (!archivo) return;
-  if (captura.tipo === 'colocacion' && !$('#cUbicacion').value.trim()) {
-    avisar('Primero escribe la ubicación / vía / equipo.'); $('#cUbicacion').focus(); return;
+  if (captura.tipo === 'colocacion' && !$('#cLocalidad').value.trim()) {
+    avisar('Primero indica la localidad donde se coloca la bandera.'); $('#cLocalidad').focus(); return;
   }
   const ms = Date.now();
   if (archivo.lastModified && ms - archivo.lastModified > ANTIGUEDAD_MAX_MS) {
@@ -164,7 +169,8 @@ $('#cFoto').addEventListener('change', async e => {
     const folio = captura.tipo === 'colocacion' ? (captura.folio ||= siguienteFolio(ms)) : r.folio;
     const blob = await fotoConMarca(archivo, {
       tipo: captura.tipo, ms, folio, gps,
-      ubicacion: captura.tipo === 'colocacion' ? $('#cUbicacion').value.trim() : r.ubicacion,
+      localidad: captura.tipo === 'colocacion' ? $('#cLocalidad').value.trim() : (r.localidad || r.ubicacion),
+      ubicacion: captura.tipo === 'colocacion' ? $('#cUbicacion').value.trim() : (r.localidad ? r.ubicacion : ''),
       responsable: a.responsable || 'Sin nombre', ficha: a.ficha, empresa: a.empresa,
       tiempo: r ? ms - r.colocacion.ms : 0, desde: r ? r.colocacion.ms : 0,
     });
@@ -187,9 +193,10 @@ $('#btnGuardar').addEventListener('click', async () => {
   const evento = { ms: captura.ms, foto: captura.blob, gps: captura.gps, responsable: a.responsable, ficha: a.ficha };
   if (captura.tipo === 'colocacion') {
     await guardar({
-      id: captura.folio, folio: captura.folio, ubicacion: $('#cUbicacion').value.trim(),
+      id: captura.folio, folio: captura.folio, localidad: $('#cLocalidad').value.trim(), ubicacion: $('#cUbicacion').value.trim(),
       obs: $('#cObs').value.trim(), empresa: a.empresa, colocacion: evento, retiro: null,
     });
+    localStorage.setItem(LOCALIDAD_KEY, $('#cLocalidad').value.trim());
     avisar('Bandera registrada como colocada. El tiempo empieza a contar.');
   } else {
     const r = captura.registro;
@@ -215,7 +222,7 @@ function urlFoto(r, tipo) {
 
 function tarjetaActiva(r) {
   return `<div class="tarjeta bandera" data-id="${esc(r.id)}">
-    <div class="cab"><h3>${esc(r.ubicacion)}</h3><span class="folio">${esc(r.folio)}</span></div>
+    <div class="cab"><h3>${esc(lugar(r))}</h3><span class="folio">${esc(r.folio)}</span></div>
     <div class="cronometro" data-desde="${r.colocacion.ms}">${duracion(Date.now() - r.colocacion.ms)}</div>
     <div class="meta">Colocada ${fechaHora(r.colocacion.ms)} · ${esc(r.colocacion.responsable || 'Sin nombre')}
       ${r.obs ? `<br>${esc(r.obs)}` : ''}</div>
@@ -225,7 +232,7 @@ function tarjetaActiva(r) {
 }
 function tarjetaHistorial(r) {
   return `<div class="tarjeta">
-    <div class="cab"><h3>${esc(r.ubicacion)}</h3><span class="folio">${esc(r.folio)}</span></div>
+    <div class="cab"><h3>${esc(lugar(r))}</h3><span class="folio">${esc(r.folio)}</span></div>
     <div class="meta">
       Colocada: ${fechaHora(r.colocacion.ms)} · ${esc(r.colocacion.responsable || '—')}<br>
       Retirada: ${fechaHora(r.retiro.ms)} · ${esc(r.retiro.responsable || '—')}<br>
@@ -262,8 +269,10 @@ async function pintar() {
   $('#listaHistorial').innerHTML = hist.length ? hist.map(tarjetaHistorial).join('')
     : '<p class="vacio">Aún no hay banderas retiradas en este periodo.</p>';
 
-  $('#ubicacionesUsadas').innerHTML = [...new Set(registros.map(r => r.ubicacion))].slice(0, 30)
+  const opciones = campo => [...new Set(registros.map(r => r[campo]).filter(Boolean))].slice(0, 30)
     .map(u => `<option value="${esc(u)}">`).join('');
+  $('#localidadesUsadas').innerHTML = opciones('localidad');
+  $('#ubicacionesUsadas').innerHTML = opciones('ubicacion');
   tic();
 }
 
@@ -295,7 +304,7 @@ document.addEventListener('click', async e => {
   else if (t.dataset.foto) verFoto(...t.dataset.foto.split('|'));
   else if (t.dataset.borrar) {
     const r = registros.find(x => x.id === t.dataset.borrar);
-    if (confirm(`¿Eliminar el registro ${r.folio} (${r.ubicacion}) y sus fotos? No se puede deshacer.`)) {
+    if (confirm(`¿Eliminar el registro ${r.folio} (${lugar(r)}) y sus fotos? No se puede deshacer.`)) {
       await borrar(r.id);
       ['colocacion', 'retiro'].forEach(k => { URL.revokeObjectURL(urls.get(r.id + k)); urls.delete(r.id + k); });
       pintar();
@@ -340,10 +349,10 @@ $('#fHasta').addEventListener('change', pintar);
 $('#btnCsv').addEventListener('click', () => {
   const hist = filtrados();
   if (!hist.length) return avisar('No hay registros en el periodo.');
-  const cols = ['Folio', 'Ubicación', 'Fecha colocación', 'Responsable colocación', 'GPS colocación',
+  const cols = ['Folio', 'Localidad', 'Vía / equipo', 'Fecha colocación', 'Responsable colocación', 'GPS colocación',
     'Fecha retiro', 'Responsable retiro', 'GPS retiro', 'Tiempo colocada (hh:mm:ss)', 'Minutos', 'Observaciones'];
   const gps = g => g ? `${g.lat.toFixed(6)}, ${g.lon.toFixed(6)}` : '';
-  const filas = hist.map(r => [r.folio, r.ubicacion, fechaHora(r.colocacion.ms), r.colocacion.responsable, gps(r.colocacion.gps),
+  const filas = hist.map(r => [r.folio, r.localidad || '', r.ubicacion, fechaHora(r.colocacion.ms), r.colocacion.responsable, gps(r.colocacion.gps),
     fechaHora(r.retiro.ms), r.retiro.responsable, gps(r.retiro.gps), duracion(r.duracionMs), (r.duracionMs / 60000).toFixed(1), r.obs]);
   const csv = [cols, ...filas].map(f => f.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const d = new Date();

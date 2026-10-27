@@ -1,5 +1,5 @@
 // Service worker: permite instalar la app y usarla sin internet.
-const CACHE = 'bandera-513-v1';
+const CACHE = 'bandera-513-v2';
 const ARCHIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png'];
 
