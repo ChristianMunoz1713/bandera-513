@@ -19,7 +19,10 @@
         <small>Regla 5.13 · Colocación y retiro</small>
       </div>
     </div>
-    <button id="btnInstalar" class="btn-chico" hidden>Instalar</button>
+    <div class="acciones-barra">
+      <button id="btnInstalar" class="btn-chico" hidden>Instalar</button>
+      <button id="btnSalir" class="btn-salir" hidden>Salir</button>
+    </div>
   </header>
 
   <section id="vista-login" class="login" hidden>
@@ -37,12 +40,11 @@
     </form>
   </section>
 
-  <p id="estadoEnvio" class="estado-envio" hidden></p>
+  <button id="estadoEnvio" class="estado-envio" type="button" hidden></button>
 
   <nav class="pestanas">
     <button data-vista="activas" class="activa">Colocadas <span id="numActivas" class="burbuja">0</span></button>
     <button data-vista="historial">Historial</button>
-    <button data-vista="ajustes">Ajustes</button>
   </nav>
 
   <main>
@@ -65,42 +67,6 @@
       <div id="listaHistorial"></div>
     </section>
 
-    <section id="vista-ajustes" class="vista" hidden>
-      <div class="tarjeta">
-        <h2>Sesión de Shop Car</h2>
-        <p id="infoSesion" class="nota"></p>
-        <div class="acciones-fila">
-          <button id="btnEnviar" class="btn-sec">Enviar pendientes</button>
-          <button id="btnSalir" class="btn-sec">Cerrar sesión</button>
-        </div>
-      </div>
-      <form id="formAjustes" class="tarjeta">
-        <h2>Datos que aparecen en la marca de agua</h2>
-        <label>Responsable (nombre)
-          <input id="aResponsable" required autocomplete="name" placeholder="Nombre y apellido">
-        </label>
-        <label>No. de empleado / ficha
-          <input id="aFicha" placeholder="Opcional">
-        </label>
-        <label>Empresa / área
-          <input id="aEmpresa" placeholder="Opcional">
-        </label>
-        <label class="check"><input type="checkbox" id="aGps" checked> Agregar ubicación GPS a la foto</label>
-        <label>Avisar cuando una bandera lleve más de (horas)
-          <input id="aAlerta" type="number" min="0" step="0.5" placeholder="0 = sin aviso">
-        </label>
-        <button class="btn-prim" type="submit">Guardar ajustes</button>
-      </form>
-      <div class="tarjeta">
-        <h2>Respaldo</h2>
-        <p class="nota">Los reportes y fotos se guardan solo en este teléfono. Haz un respaldo de vez en cuando.</p>
-        <div class="acciones-fila">
-          <button id="btnRespaldo" class="btn-sec">Descargar respaldo</button>
-          <label class="btn-sec">Restaurar respaldo<input type="file" id="inRestaurar" accept=".json,application/json" hidden></label>
-        </div>
-        <p id="espacio" class="nota"></p>
-      </div>
-    </section>
   </main>
 
   <!-- Captura de colocación / retiro -->
@@ -112,14 +78,29 @@
           <input id="cLocalidad" required placeholder="Ej. Patio Valle de México" list="localidadesUsadas" autocomplete="off">
           <datalist id="localidadesUsadas"></datalist>
         </label>
-        <label>Vía / equipo protegido
-          <input id="cUbicacion" placeholder="Ej. Vía 3, carro GMX 12345" list="ubicacionesUsadas" autocomplete="off">
-          <datalist id="ubicacionesUsadas"></datalist>
+        <label>Vía
+          <input id="cVia" required placeholder="Ej. Vía 3" list="viasUsadas" autocomplete="off">
+          <datalist id="viasUsadas"></datalist>
         </label>
-        <p class="nota">La fecha, la hora y la ubicación GPS se agregan solas a la foto.</p>
+        <label>Equipo protegido
+          <input id="cEquipo" placeholder="Opcional. Ej. carro GMX 12345" autocomplete="off">
+        </label>
+        <label>¿Quién colocó la bandera?
+          <input id="cColoco" required placeholder="Nombre de quien la colocó" list="personasUsadas" autocomplete="off">
+          <datalist id="personasUsadas"></datalist>
+        </label>
         <label>Observaciones
           <textarea id="cObs" rows="2" placeholder="Opcional"></textarea>
         </label>
+        <p class="nota">La fecha, la hora y la ubicación GPS se agregan solas a la foto.</p>
+      </div>
+      <div id="capBloqueo" class="bloqueo" hidden>
+        <p id="bloqueoTexto"></p>
+        <div id="bloqueoRetirar"></div>
+        <label>Si no se retiró, indica el motivo
+          <textarea id="bMotivo" rows="2" placeholder="Ej. el turno anterior no la retiró / se perdió la bandera"></textarea>
+        </label>
+        <button type="button" id="btnCerrarSinRetiro" class="btn-sec">Cerrar sin retiro y continuar</button>
       </div>
       <div id="capResumen" class="resumen-retiro" hidden></div>
 

@@ -114,6 +114,18 @@ dialog::backdrop { background: rgba(10, 20, 40, .6); }
   margin: 0; padding: 8px 16px; font-size: 13px; background: #fff4e0; color: var(--ambar); text-align: center;
 }
 .estado-envio.ok { background: #e6f4ee; color: var(--verde); }
+button.estado-envio { display: block; width: 100%; border: 0; font: inherit; font-size: 13px; cursor: pointer; }
+.acciones-barra { display: flex; gap: 8px; align-items: center; }
+.btn-salir {
+  background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.5); border-radius: 10px; padding: 6px 12px;
+}
+.bloqueo {
+  background: #fff4e0; border: 1px solid #f0c27a; border-radius: 12px; padding: 12px; margin-bottom: 12px; font-size: 14px;
+}
+.bloqueo p { margin: 0 0 10px; }
+.bloqueo .btn-retirar { margin: 0 0 10px; }
+.envio.alerta { color: var(--rojo); }
+.sin-retiro { font-weight: 700; color: var(--ambar); }
 .envio { display: inline-block; margin-top: 6px; font-size: 12px; font-weight: 600; color: var(--ambar); }
 .envio.ok { color: var(--verde); }
 .aviso {

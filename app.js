@@ -3,9 +3,10 @@
 // y cuenta el tiempo que la bandera permanece colocada. Cada registro se guarda primero en este
 // dispositivo (IndexedDB) y luego se envía a Shop Car a nombre del usuario que inició sesión; si no
 // hay señal queda pendiente y se reintenta solo.
+// Solo puede haber una bandera abierta por localidad y vía: para colocar otra, la abierta se retira
+// o se cierra indicando el motivo por el que no se retiró (Shop Car lo hace cumplir también).
 
 const $ = s => document.querySelector(s);
-const AJUSTES_KEY = 'bandera513-ajustes';
 const FOLIO_KEY = 'bandera513-folio';
 const LOCALIDAD_KEY = 'bandera513-localidad'; // última localidad usada, para no reescribirla
 const MAX_LADO = 1600;              // px del lado mayor de la foto guardada
@@ -34,10 +35,6 @@ const guardar = reg => tx('readwrite', st => st.put(reg));
 const borrar = id => tx('readwrite', st => st.delete(id));
 
 // ---------- Utilidades ----------
-const ajustes = () => {
-  try { return Object.assign({ responsable: '', ficha: '', empresa: '', gps: true, alertaHoras: 0 }, JSON.parse(localStorage.getItem(AJUSTES_KEY))); }
-  catch { return { responsable: '', ficha: '', empresa: '', gps: true, alertaHoras: 0 }; }
-};
 const dos = n => String(n).padStart(2, '0');
 function fechaHora(ms) {
   const d = new Date(ms);
@@ -48,8 +45,14 @@ function duracion(ms) {
   const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
   return (d ? `${d} d ` : '') + `${dos(h)}:${dos(m)}:${dos(s % 60)}`;
 }
-// Título del lugar: localidad y, si se capturó, la vía o equipo (los registros antiguos solo tienen ubicación)
-const lugar = r => [r.localidad, r.ubicacion].filter(Boolean).join(' · ');
+// Los registros anteriores guardaban vía y equipo juntos en `ubicacion` y no tenían "colocó".
+const viaDe = r => r.via ?? r.ubicacion ?? '';
+const colocoDe = r => r.coloco || r.colocacion.responsable || 'Sin nombre';
+const lugar = r => [r.localidad, viaDe(r), r.equipo].filter(Boolean).join(' · ');
+const abierta = r => !r.retiro && !r.cierre;
+const finDe = r => r.retiro?.ms ?? r.cierre?.ms;
+// Igual que fn_bandera_clave de Shop Car: "Vía 3", "via 3" y " VÍA  3 " son la misma vía.
+const clave = t => String(t ?? '').trim().replace(/\s+/g, ' ').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function avisar(txt, ms = 3200) {
   const a = $('#aviso'); a.textContent = txt; a.hidden = false;
@@ -62,7 +65,7 @@ function siguienteFolio(ms) {
   return `B513-${dia}-${String(n).padStart(4, '0')}`;
 }
 function obtenerGPS() {
-  if (!ajustes().gps || !navigator.geolocation) return Promise.resolve(null);
+  if (!navigator.geolocation) return Promise.resolve(null);
   return new Promise(ok => navigator.geolocation.getCurrentPosition(
     p => ok({ lat: p.coords.latitude, lon: p.coords.longitude, prec: Math.round(p.coords.accuracy) }),
     () => ok(null), { enableHighAccuracy: true, timeout: 12000, maximumAge: 30000 }));
@@ -96,9 +99,6 @@ async function iniciarSesion(usuario, password) {
   const perfil = r.ok ? (await r.json())[0] : null;
   sesion.nombre = perfil?.nombre_completo || sesion.usuario;
   localStorage.setItem(SESION_KEY, JSON.stringify(sesion));
-  // El nombre de Shop Car es el que va en la marca de agua.
-  const a = ajustes();
-  localStorage.setItem(AJUSTES_KEY, JSON.stringify({ ...a, responsable: sesion.nombre }));
   // Los reportes hechos antes de existir el inicio de sesión no tienen dueño: se envían
   // a nombre del primer usuario que entre en este teléfono.
   for (const r of await todos()) {
@@ -128,6 +128,12 @@ async function api(ruta, opciones = {}) {
   const t = await token();
   return fetch(SHOPCAR.url + ruta, { ...opciones, headers: { apikey: SHOPCAR.anonKey, Authorization: `Bearer ${t}`, ...opciones.headers } });
 }
+async function rpc(nombre, args) {
+  const r = await api(`/rest/v1/rpc/${nombre}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args) });
+  const j = r.status === 204 ? null : await r.json().catch(() => null);
+  if (!r.ok) throw new Error(j?.message || `Error ${r.status}`);
+  return j;
+}
 async function subirFoto(ruta, blob) {
   const r = await api(`/storage/v1/object/${BUCKET}/${ruta}`, { method: 'POST', headers: { 'Content-Type': 'image/jpeg' }, body: blob });
   if (r.ok) return;
@@ -137,25 +143,37 @@ async function subirFoto(ruta, blob) {
   throw new Error(j.message || j.error || `Error ${r.status} al subir la foto`);
 }
 const gpsCampos = (pre, g) => ({ [`${pre}_lat`]: g?.lat ?? null, [`${pre}_lon`]: g?.lon ?? null, [`${pre}_precision_m`]: g?.prec ?? null });
-const pendiente = r => r.usuarioId && (!r.enviado?.colocacion || (r.retiro && !r.enviado?.retiro));
+const pendiente = r => r.usuarioId && (!r.enviado?.colocacion || (r.retiro && !r.enviado?.retiro) || (r.cierre && !r.enviado?.cierre));
 
 async function enviarRegistro(r) {
-  const carpeta = r.usuarioId;
   if (!r.enviado.colocacion) {
-    const ruta = `${carpeta}/${r.remotoId}_colocacion.jpg`;
+    const ruta = `${r.usuarioId}/${r.remotoId}_colocacion.jpg`;
     await subirFoto(ruta, r.colocacion.foto);
+    const viejo = !('via' in r);
     const res = await api('/rest/v1/banderas_azules', {
       method: 'POST', headers: { 'Content-Type': 'application/json', Prefer: 'return=minimal' },
       body: JSON.stringify({
-        id: r.remotoId, folio: r.folio, responsable: r.colocacion.responsable || 'Sin nombre', ficha: r.colocacion.ficha || null,
-        empresa: r.empresa || null, localidad: r.localidad || r.ubicacion, via_equipo: (r.localidad && r.ubicacion) || null,
+        id: r.remotoId, folio: r.folio, responsable: colocoDe(r), ficha: r.colocacion.ficha || null,
+        empresa: r.empresa || null, localidad: r.localidad || r.ubicacion,
+        via: viejo ? null : r.via, equipo: viejo ? null : (r.equipo || null),
+        via_equipo: viejo ? ((r.localidad && r.ubicacion) || null) : null,
         observaciones: r.obs || null, colocada_at: new Date(r.colocacion.ms).toISOString(),
         ...gpsCampos('colocada', r.colocacion.gps), foto_colocacion: ruta,
       }),
     });
-    // 409 = ya existía (se había enviado y no llegó la respuesta).
-    if (!res.ok && res.status !== 409) throw new Error((await res.json().catch(() => ({}))).message || `Error ${res.status}`);
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      if (/banderas_una_abierta_por_via/.test(j.message || '')) {
+        // En Shop Car ya hay otra abierta en esa vía (de otro teléfono): hay que indicar el motivo.
+        r.conflicto = true;
+        await guardar(r);
+        throw new Error('Ya hay una bandera abierta en esa vía en Shop Car');
+      }
+      // Otro 409 = ya existía (se había enviado y no llegó la respuesta).
+      if (res.status !== 409) throw new Error(j.message || `Error ${res.status}`);
+    }
     r.enviado.colocacion = true;
+    r.conflicto = false;
     await guardar(r);
   }
   if (r.retiro && !r.enviado.retiro) {
@@ -170,10 +188,19 @@ async function enviarRegistro(r) {
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
-      // Ya estaba registrada como retirada (otro intento sí llegó, o la retiró un supervisor).
-      if (!/ya se registró como retirada/.test(j.message || '')) throw new Error(j.message || `Error ${res.status}`);
+      // Ya estaba retirada o cerrada sin retiro (otro intento sí llegó, o la cerró alguien más).
+      if (!/ya se registró como retirada|ya se cerró sin retiro/.test(j.message || '')) throw new Error(j.message || `Error ${res.status}`);
     }
     r.enviado.retiro = true;
+    await guardar(r);
+  }
+  if (r.cierre && !r.enviado.cierre) {
+    try {
+      await rpc('cerrar_bandera_sin_retiro', { p_id: r.remotoId, p_motivo: r.cierre.motivo });
+    } catch (err) {
+      if (!/ya no está abierta/.test(err.message)) throw err;
+    }
+    r.enviado.cierre = true;
     await guardar(r);
   }
 }
@@ -184,7 +211,9 @@ async function sincronizar(manual = false) {
   enviando = true;
   let error = null;
   try {
-    for (const r of await todos()) {
+    // De la más vieja a la más nueva: el cierre de la anterior tiene que llegar antes que la nueva de esa vía.
+    const lista = (await todos()).sort((a, b) => a.colocacion.ms - b.colocacion.ms);
+    for (const r of lista) {
       if (r.usuarioId !== sesion.usuarioId || !pendiente(r)) continue;
       try { await enviarRegistro(r); } catch (err) { error = err; if (!sesion) break; }
     }
@@ -202,6 +231,7 @@ function mostrarLogin() {
   $('#vista-login').hidden = !sinSesion;
   document.querySelector('.pestanas').hidden = sinSesion;
   document.querySelector('main').hidden = sinSesion;
+  $('#btnSalir').hidden = sinSesion;
   if (sinSesion) {
     $('#estadoEnvio').hidden = true;
     $('#loginError').hidden = true;
@@ -214,7 +244,7 @@ $('#formLogin').addEventListener('submit', async e => {
   try {
     await iniciarSesion($('#lUsuario').value, $('#lPassword').value);
     $('#lPassword').value = '';
-    mostrarLogin(); cargarAjustes();
+    mostrarLogin();
     document.querySelector('[data-vista="activas"]').click();
     avisar(`Bienvenido, ${sesion.nombre}.`);
     await pintar(); sincronizar();
@@ -225,10 +255,12 @@ $('#formLogin').addEventListener('submit', async e => {
 });
 $('#btnSalir').addEventListener('click', async () => {
   const n = (await todos()).filter(r => r.usuarioId === sesion?.usuarioId && pendiente(r)).length;
-  if (n && !confirm(`Tienes ${n} registro(s) sin enviar a Shop Car. Se enviarán cuando vuelvas a entrar con este usuario. ¿Cerrar sesión?`)) return;
-  cerrarSesion();
+  const msj = n
+    ? `Tienes ${n} registro(s) sin enviar a Shop Car. Se enviarán cuando vuelvas a entrar con este usuario. ¿Cerrar sesión?`
+    : `¿Cerrar la sesión de ${sesion.nombre}?`;
+  if (confirm(msj)) cerrarSesion();
 });
-$('#btnEnviar').addEventListener('click', () => sincronizar(true));
+$('#estadoEnvio').addEventListener('click', () => sincronizar(true));
 
 // ---------- Marca de agua ----------
 async function fotoConMarca(archivo, info) {
@@ -260,11 +292,16 @@ async function fotoConMarca(archivo, info) {
     [`${info.tipo === 'colocacion' ? 'COLOCACIÓN' : 'RETIRO'} DE BANDERA · REGLA 5.13`, true],
     [`Fecha y hora: ${fechaHora(info.ms)}`],
     [`Localidad: ${info.localidad}`],
-    ...(info.ubicacion ? [[`Vía / equipo: ${info.ubicacion}`]] : []),
-    [`Responsable: ${info.responsable}${info.ficha ? ' · Ficha ' + info.ficha : ''}`],
+    ...(info.via ? [[`Vía: ${info.via}`]] : []),
+    ...(info.equipo ? [[`Equipo: ${info.equipo}`]] : []),
+    [`Colocó: ${info.coloco}`],
   ];
-  if (info.empresa) lineas.push([info.empresa]);
-  if (info.tipo === 'retiro') lineas.push([`Tiempo colocada: ${duracion(info.tiempo)}  (desde ${fechaHora(info.desde)})`, true]);
+  if (info.tipo === 'retiro') {
+    lineas.push([`Retiró: ${info.reporta}`]);
+    lineas.push([`Tiempo colocada: ${duracion(info.tiempo)}  (desde ${fechaHora(info.desde)})`, true]);
+  } else if (info.reporta !== info.coloco) {
+    lineas.push([`Reportó: ${info.reporta}`]);
+  }
   lineas.push([info.gps ? `GPS: ${info.gps.lat.toFixed(6)}, ${info.gps.lon.toFixed(6)} ±${info.gps.prec} m` : 'GPS: no disponible']);
   lineas.push([`Folio: ${info.folio}`]);
 
@@ -284,41 +321,127 @@ async function fotoConMarca(archivo, info) {
   return new Promise(ok => cv.toBlob(ok, 'image/jpeg', 0.86));
 }
 
+// ---------- Una bandera abierta por vía ----------
+// Revisa las banderas abiertas de este teléfono y, si hay señal, las de Shop Car (de cualquier persona).
+let revisionVia = { clave: '', estado: 'pendiente', locales: [], remotas: [] };
+
+async function revisarVia() {
+  const loc = $('#cLocalidad').value.trim(), via = $('#cVia').value.trim();
+  const k = `${clave(loc)}|${clave(via)}`;
+  if (!loc || !via) { revisionVia = { clave: '', estado: 'pendiente', locales: [], remotas: [] }; pintarBloqueo(); return revisionVia; }
+  revisionVia = { clave: k, estado: 'verificando', locales: [], remotas: [] };
+  const registrosLocales = await todos();
+  const locales = registrosLocales.filter(r => abierta(r) && clave(r.localidad) === clave(loc) && clave(viaDe(r)) === clave(via));
+  let remotas = [];
+  if (navigator.onLine && sesion) {
+    try {
+      // Las de este teléfono se juzgan por lo que hay aquí (un cierre puede no haber llegado aún).
+      const propias = new Set(registrosLocales.map(r => r.remotoId));
+      remotas = (await rpc('banderas_abiertas_en_via', { p_localidad: loc, p_via: via })).filter(b => !propias.has(b.id));
+    } catch { /* sin señal: solo cuenta lo de este teléfono; Shop Car lo vuelve a revisar al enviar */ }
+  }
+  if (revisionVia.clave !== k) return revisionVia; // cambiaron los campos mientras se revisaba
+  revisionVia = { clave: k, estado: locales.length || remotas.length ? 'bloqueada' : 'libre', locales, remotas };
+  pintarBloqueo();
+  return revisionVia;
+}
+function pintarBloqueo() {
+  const b = revisionVia, bloqueada = b.estado === 'bloqueada';
+  $('#capBloqueo').hidden = !bloqueada;
+  if (!bloqueada) return;
+  const lista = [
+    ...b.locales.map(r => `${r.folio}, colocada ${fechaHora(r.colocacion.ms)} por ${colocoDe(r)}`),
+    ...b.remotas.map(r => `${r.folio}, colocada ${fechaHora(new Date(r.colocada_at).getTime())} por ${r.responsable}`),
+  ];
+  $('#bloqueoTexto').innerHTML = `⚠ <b>Ya hay una bandera abierta en esta vía.</b> No se puede colocar otra hasta que se retire o se indique por qué no se retiró:<br>${lista.map(esc).join('<br>')}`;
+  $('#bloqueoRetirar').innerHTML = b.locales.map(r =>
+    `<button type="button" class="btn-retirar" data-retirar="${esc(r.id)}">Retirar ${esc(r.folio)}</button>`).join('');
+}
+let revisionTimer;
+['#cLocalidad', '#cVia'].forEach(s => $(s).addEventListener('input', () => {
+  revisionVia = { clave: '', estado: 'pendiente', locales: [], remotas: [] };
+  clearTimeout(revisionTimer); revisionTimer = setTimeout(revisarVia, 500);
+}));
+
+$('#btnCerrarSinRetiro').addEventListener('click', async () => {
+  const motivo = $('#bMotivo').value.trim();
+  if (!motivo) { avisar('Escribe el motivo por el que no se retiró la bandera.'); $('#bMotivo').focus(); return; }
+  if (revisionVia.remotas.length && !navigator.onLine) { avisar('Se necesita señal para cerrar una bandera de otro teléfono.', 4500); return; }
+  const btn = $('#btnCerrarSinRetiro'); btn.disabled = true;
+  try {
+    for (const b of revisionVia.remotas) {
+      try { await rpc('cerrar_bandera_sin_retiro', { p_id: b.id, p_motivo: motivo }); }
+      catch (err) { if (!/ya no está abierta/.test(err.message)) throw err; }
+    }
+    for (const r of revisionVia.locales) {
+      r.cierre = { ms: Date.now(), motivo, responsable: sesion.nombre };
+      r.enviado = { ...r.enviado, cierre: false };
+      await guardar(r);
+    }
+    $('#bMotivo').value = '';
+    await revisarVia();
+    await pintar();
+    sincronizar();
+    avisar('Bandera anterior cerrada sin retiro. Ya puedes tomar la foto de la nueva.', 4500);
+  } catch (err) {
+    avisar('No se pudo cerrar: ' + err.message, 5000);
+  } finally { btn.disabled = false; }
+});
+
 // ---------- Captura (colocar / retirar) ----------
-let captura = null; // { tipo, registro?, blob, ms, gps }
+let captura = null; // { tipo, registro?, blob, ms, gps, folio }
 
 function abrirCaptura(tipo, registro) {
+  if ($('#dlgCaptura').open) $('#dlgCaptura').close();
   captura = { tipo, registro };
   $('#formCaptura').reset();
   $('#capVista').hidden = true; $('#capVista').src = '';
   $('#btnGuardar').disabled = true;
   $('#capEstado').textContent = '';
-  const a = ajustes();
+  $('#capBloqueo').hidden = true;
+  revisionVia = { clave: '', estado: 'pendiente', locales: [], remotas: [] };
   if (tipo === 'colocacion') {
     $('#capTitulo').textContent = 'Colocar bandera';
     $('#capDatos').hidden = false; $('#capResumen').hidden = true;
-    $('#cLocalidad').required = true;
+    ['#cLocalidad', '#cVia', '#cColoco'].forEach(s => $(s).required = true);
     $('#cLocalidad').value = localStorage.getItem(LOCALIDAD_KEY) || '';
+    $('#cColoco').value = sesion?.nombre || '';
     $('#lblFoto span').textContent = '📷 Tomar foto de la bandera colocada';
   } else {
     $('#capTitulo').textContent = 'Retirar bandera';
     $('#capDatos').hidden = true; $('#capResumen').hidden = false;
-    $('#cLocalidad').required = false;
-    $('#capResumen').innerHTML = `<b>${esc(lugar(registro))}</b><br>Colocada: ${fechaHora(registro.colocacion.ms)}<br>
+    ['#cLocalidad', '#cVia', '#cColoco'].forEach(s => $(s).required = false);
+    $('#capResumen').innerHTML = `<b>${esc(lugar(registro))}</b><br>Colocada: ${fechaHora(registro.colocacion.ms)} por ${esc(colocoDe(registro))}<br>
       Folio: ${esc(registro.folio)}<br>Tiempo colocada: <b id="capTiempo" data-desde="${registro.colocacion.ms}">${duracion(Date.now() - registro.colocacion.ms)}</b>`;
     $('#lblFoto span').textContent = '📷 Tomar foto del retiro';
   }
-  if (!a.responsable) $('#capEstado').textContent = 'Tip: captura tu nombre en Ajustes para que aparezca en la marca de agua.';
   $('#dlgCaptura').showModal();
 }
+
+// Antes de abrir la cámara para una colocación: datos completos y vía libre. La revisión de la vía
+// es asíncrona y la cámara solo abre con un toque directo, así que si aún no está lista se pide
+// volver a tocar.
+$('#lblFoto').addEventListener('click', e => {
+  if (captura?.tipo !== 'colocacion') return;
+  const falta = [['#cLocalidad', 'la localidad'], ['#cVia', 'la vía'], ['#cColoco', 'quién colocó la bandera']]
+    .find(([s]) => !$(s).value.trim());
+  if (falta) { e.preventDefault(); avisar(`Primero indica ${falta[1]}.`); $(falta[0]).focus(); return; }
+  const k = `${clave($('#cLocalidad').value)}|${clave($('#cVia').value)}`;
+  if (revisionVia.clave !== k || revisionVia.estado === 'verificando' || revisionVia.estado === 'pendiente') {
+    e.preventDefault();
+    $('#capEstado').textContent = 'Revisando si hay otra bandera abierta en esta vía…';
+    revisarVia().then(r => {
+      $('#capEstado').textContent = r.estado === 'libre' ? 'Vía libre. Toca de nuevo "Tomar foto".' : '';
+    });
+    return;
+  }
+  if (revisionVia.estado === 'bloqueada') { e.preventDefault(); $('#capBloqueo').scrollIntoView({ behavior: 'smooth' }); }
+});
 
 $('#cFoto').addEventListener('change', async e => {
   const archivo = e.target.files[0];
   e.target.value = '';
   if (!archivo) return;
-  if (captura.tipo === 'colocacion' && !$('#cLocalidad').value.trim()) {
-    avisar('Primero indica la localidad donde se coloca la bandera.'); $('#cLocalidad').focus(); return;
-  }
   const ms = Date.now();
   if (archivo.lastModified && ms - archivo.lastModified > ANTIGUEDAD_MAX_MS) {
     $('#capEstado').textContent = '⚠ Esa foto no es reciente. Toma la foto en este momento con la cámara.';
@@ -327,15 +450,15 @@ $('#cFoto').addEventListener('change', async e => {
   $('#capEstado').textContent = 'Procesando foto y ubicación…';
   $('#btnGuardar').disabled = true;
   try {
-    const a = ajustes();
     const gps = await obtenerGPS();
     const r = captura.registro;
     const folio = captura.tipo === 'colocacion' ? (captura.folio ||= siguienteFolio(ms)) : r.folio;
     const blob = await fotoConMarca(archivo, {
-      tipo: captura.tipo, ms, folio, gps,
+      tipo: captura.tipo, ms, folio, gps, reporta: sesion?.nombre || 'Sin nombre',
       localidad: captura.tipo === 'colocacion' ? $('#cLocalidad').value.trim() : (r.localidad || r.ubicacion),
-      ubicacion: captura.tipo === 'colocacion' ? $('#cUbicacion').value.trim() : (r.localidad ? r.ubicacion : ''),
-      responsable: a.responsable || 'Sin nombre', ficha: a.ficha, empresa: a.empresa,
+      via: captura.tipo === 'colocacion' ? $('#cVia').value.trim() : (r.localidad ? viaDe(r) : ''),
+      equipo: captura.tipo === 'colocacion' ? $('#cEquipo').value.trim() : r.equipo,
+      coloco: captura.tipo === 'colocacion' ? $('#cColoco').value.trim() : colocoDe(r),
       tiempo: r ? ms - r.colocacion.ms : 0, desde: r ? r.colocacion.ms : 0,
     });
     Object.assign(captura, { blob, ms, gps, folio });
@@ -353,19 +476,21 @@ $('#cFoto').addEventListener('change', async e => {
 
 $('#btnGuardar').addEventListener('click', async () => {
   if (!captura?.blob) return;
-  const a = ajustes();
-  const evento = { ms: captura.ms, foto: captura.blob, gps: captura.gps, responsable: a.responsable, ficha: a.ficha };
   if (captura.tipo === 'colocacion') {
+    // Pudieron colocar otra en la misma vía mientras se tomaba la foto.
+    if ((await revisarVia()).estado === 'bloqueada') { $('#capBloqueo').scrollIntoView({ behavior: 'smooth' }); return; }
     await guardar({
-      id: captura.folio, folio: captura.folio, localidad: $('#cLocalidad').value.trim(), ubicacion: $('#cUbicacion').value.trim(),
-      obs: $('#cObs').value.trim(), empresa: a.empresa, colocacion: evento, retiro: null,
-      remotoId: crypto.randomUUID(), usuarioId: sesion.usuarioId, enviado: { colocacion: false, retiro: false },
+      id: captura.folio, folio: captura.folio, localidad: $('#cLocalidad').value.trim(), via: $('#cVia').value.trim(),
+      equipo: $('#cEquipo').value.trim(), coloco: $('#cColoco').value.trim(), obs: $('#cObs').value.trim(),
+      colocacion: { ms: captura.ms, foto: captura.blob, gps: captura.gps, responsable: sesion.nombre },
+      retiro: null, cierre: null,
+      remotoId: crypto.randomUUID(), usuarioId: sesion.usuarioId, enviado: { colocacion: false, retiro: false, cierre: false },
     });
     localStorage.setItem(LOCALIDAD_KEY, $('#cLocalidad').value.trim());
     avisar('Bandera registrada como colocada. El tiempo empieza a contar.');
   } else {
     const r = captura.registro;
-    r.retiro = evento;
+    r.retiro = { ms: captura.ms, foto: captura.blob, gps: captura.gps, responsable: sesion.nombre };
     r.duracionMs = captura.ms - r.colocacion.ms;
     await guardar(r);
     avisar(`Bandera retirada. Tiempo colocada: ${duracion(r.duracionMs)}`, 5000);
@@ -388,6 +513,10 @@ function urlFoto(r, tipo) {
 
 function etiquetaEnvio(r) {
   if (!r.usuarioId) return '<span class="envio">Solo en este teléfono</span>';
+  if (r.conflicto) {
+    return `<span class="envio alerta">⚠ En Shop Car ya había otra bandera abierta en esta vía.</span>
+      <button class="btn-retirar" data-conflicto="${esc(r.id)}">Indicar motivo y enviar</button>`;
+  }
   return pendiente(r) ? '<span class="envio">⏳ Pendiente de enviar a Shop Car</span>' : '<span class="envio ok">✓ Enviado a Shop Car</span>';
 }
 
@@ -395,24 +524,27 @@ function tarjetaActiva(r) {
   return `<div class="tarjeta bandera" data-id="${esc(r.id)}">
     <div class="cab"><h3>${esc(lugar(r))}</h3><span class="folio">${esc(r.folio)}</span></div>
     <div class="cronometro" data-desde="${r.colocacion.ms}">${duracion(Date.now() - r.colocacion.ms)}</div>
-    <div class="meta">Colocada ${fechaHora(r.colocacion.ms)} · ${esc(r.colocacion.responsable || 'Sin nombre')}
+    <div class="meta">Colocada ${fechaHora(r.colocacion.ms)} · Colocó: ${esc(colocoDe(r))}
       ${r.obs ? `<br>${esc(r.obs)}` : ''}<br>${etiquetaEnvio(r)}</div>
     <div class="fotos"><figure><img src="${urlFoto(r, 'colocacion')}" data-foto="${esc(r.id)}|colocacion" alt="Foto de colocación"><figcaption>Colocación</figcaption></figure></div>
     <button class="btn-retirar" data-retirar="${esc(r.id)}">Retirar bandera</button>
   </div>`;
 }
 function tarjetaHistorial(r) {
+  const fin = r.retiro
+    ? `Retirada: ${fechaHora(r.retiro.ms)} · ${esc(r.retiro.responsable || '—')}`
+    : `<span class="sin-retiro">Cerrada sin retiro</span>: ${fechaHora(r.cierre.ms)} · Motivo: ${esc(r.cierre.motivo)}`;
   return `<div class="tarjeta">
     <div class="cab"><h3>${esc(lugar(r))}</h3><span class="folio">${esc(r.folio)}</span></div>
     <div class="meta">
-      Colocada: ${fechaHora(r.colocacion.ms)} · ${esc(r.colocacion.responsable || '—')}<br>
-      Retirada: ${fechaHora(r.retiro.ms)} · ${esc(r.retiro.responsable || '—')}<br>
-      Tiempo colocada: <span class="duracion">${duracion(r.duracionMs)}</span>
+      Colocada: ${fechaHora(r.colocacion.ms)} · Colocó: ${esc(colocoDe(r))}<br>
+      ${fin}<br>
+      Tiempo colocada: <span class="duracion">${duracion(finDe(r) - r.colocacion.ms)}</span>
       ${r.obs ? `<br>${esc(r.obs)}` : ''}<br>${etiquetaEnvio(r)}
     </div>
     <div class="fotos">
       <figure><img src="${urlFoto(r, 'colocacion')}" data-foto="${esc(r.id)}|colocacion" alt="Foto de colocación"><figcaption>Colocación</figcaption></figure>
-      <figure><img src="${urlFoto(r, 'retiro')}" data-foto="${esc(r.id)}|retiro" alt="Foto de retiro"><figcaption>Retiro</figcaption></figure>
+      ${r.retiro ? `<figure><img src="${urlFoto(r, 'retiro')}" data-foto="${esc(r.id)}|retiro" alt="Foto de retiro"><figcaption>Retiro</figcaption></figure>` : ''}
     </div>
     ${pendiente(r) ? '' : `<button class="borrar" data-borrar="${esc(r.id)}">Quitar de este teléfono</button>`}
   </div>`;
@@ -421,29 +553,29 @@ function tarjetaHistorial(r) {
 function filtrados() {
   const d = $('#fDesde').value, h = $('#fHasta').value;
   const ini = d ? new Date(d + 'T00:00').getTime() : -Infinity, fin = h ? new Date(h + 'T23:59:59.999').getTime() : Infinity;
-  return registros.filter(r => r.retiro && r.colocacion.ms >= ini && r.colocacion.ms <= fin)
-    .sort((a, b) => b.retiro.ms - a.retiro.ms);
+  return registros.filter(r => !abierta(r) && r.colocacion.ms >= ini && r.colocacion.ms <= fin)
+    .sort((a, b) => finDe(b) - finDe(a));
 }
 
 async function pintar() {
   registros = await todos();
-  const activas = registros.filter(r => !r.retiro).sort((a, b) => a.colocacion.ms - b.colocacion.ms);
+  const activas = registros.filter(abierta).sort((a, b) => a.colocacion.ms - b.colocacion.ms);
   $('#numActivas').textContent = activas.length;
   $('#listaActivas').innerHTML = activas.length ? activas.map(tarjetaActiva).join('')
     : '<p class="vacio">No hay banderas colocadas en este momento.</p>';
 
   const hist = filtrados();
-  const total = hist.reduce((s, r) => s + r.duracionMs, 0);
+  const tiempos = hist.map(r => finDe(r) - r.colocacion.ms);
   $('#resumen').innerHTML = `<div><b>${hist.length}</b><span>Reportes</span></div>
-    <div><b>${hist.length ? duracion(total / hist.length) : '—'}</b><span>Promedio</span></div>
-    <div><b>${hist.length ? duracion(Math.max(...hist.map(r => r.duracionMs))) : '—'}</b><span>Máximo</span></div>`;
+    <div><b>${hist.length ? duracion(tiempos.reduce((s, t) => s + t, 0) / hist.length) : '—'}</b><span>Promedio</span></div>
+    <div><b>${hist.length ? duracion(Math.max(...tiempos)) : '—'}</b><span>Máximo</span></div>`;
   $('#listaHistorial').innerHTML = hist.length ? hist.map(tarjetaHistorial).join('')
     : '<p class="vacio">Aún no hay banderas retiradas en este periodo.</p>';
 
-  const opciones = campo => [...new Set(registros.map(r => r[campo]).filter(Boolean))].slice(0, 30)
-    .map(u => `<option value="${esc(u)}">`).join('');
-  $('#localidadesUsadas').innerHTML = opciones('localidad');
-  $('#ubicacionesUsadas').innerHTML = opciones('ubicacion');
+  const opciones = valores => [...new Set(valores.filter(Boolean))].slice(0, 30).map(u => `<option value="${esc(u)}">`).join('');
+  $('#localidadesUsadas').innerHTML = opciones(registros.map(r => r.localidad));
+  $('#viasUsadas').innerHTML = opciones(registros.map(r => r.via));
+  $('#personasUsadas').innerHTML = opciones([sesion?.nombre, ...registros.map(r => r.coloco)]);
 
   if (sesion) {
     const pendientes = registros.filter(r => r.usuarioId === sesion.usuarioId && pendiente(r)).length;
@@ -451,29 +583,16 @@ async function pintar() {
     e.hidden = false;
     e.classList.toggle('ok', !pendientes);
     e.textContent = pendientes
-      ? `⏳ ${pendientes} registro(s) pendientes de enviar a Shop Car${navigator.onLine ? '' : ' (sin conexión)'}`
+      ? `⏳ ${pendientes} registro(s) pendientes de enviar a Shop Car${navigator.onLine ? '' : ' (sin conexión)'} · toca para enviar`
       : `✓ ${sesion.nombre} · todo enviado a Shop Car`;
-    $('#infoSesion').textContent = `${sesion.nombre} (${sesion.usuario}) · ${pendientes} pendiente(s) de enviar.`;
   }
   tic();
 }
 
 // Cronómetros en vivo
-const avisadas = new Set();
 function tic() {
-  const ahora = Date.now(), lim = (parseFloat(ajustes().alertaHoras) || 0) * 3600e3;
-  document.querySelectorAll('.cronometro[data-desde]').forEach(el => {
-    const t = ahora - Number(el.dataset.desde);
-    el.textContent = duracion(t);
-    const tarjeta = el.closest('.bandera');
-    const pasada = lim > 0 && t >= lim;
-    tarjeta.classList.toggle('alerta', pasada);
-    if (pasada && !avisadas.has(tarjeta.dataset.id)) {
-      avisadas.add(tarjeta.dataset.id);
-      avisar(`⚠ La bandera en "${tarjeta.querySelector('h3').textContent}" lleva más de ${ajustes().alertaHoras} h colocada.`, 6000);
-      navigator.vibrate && navigator.vibrate([300, 150, 300]);
-    }
-  });
+  const ahora = Date.now();
+  document.querySelectorAll('.cronometro[data-desde]').forEach(el => { el.textContent = duracion(ahora - Number(el.dataset.desde)); });
   const ct = $('#capTiempo');
   if (ct) ct.textContent = duracion(ahora - Number(ct.dataset.desde));
 }
@@ -484,6 +603,7 @@ document.addEventListener('click', async e => {
   const t = e.target;
   if (t.dataset.retirar) abrirCaptura('retiro', registros.find(r => r.id === t.dataset.retirar));
   else if (t.dataset.foto) verFoto(...t.dataset.foto.split('|'));
+  else if (t.dataset.conflicto) resolverConflicto(registros.find(r => r.id === t.dataset.conflicto));
   else if (t.dataset.borrar) {
     const r = registros.find(x => x.id === t.dataset.borrar);
     const aviso = r.usuarioId ? ' En Shop Car el registro se conserva.' : ' No se puede deshacer.';
@@ -495,6 +615,22 @@ document.addEventListener('click', async e => {
   }
 });
 $('#btnColocar').addEventListener('click', () => abrirCaptura('colocacion'));
+
+// Una colocación hecha sin señal chocó en Shop Car con otra abierta en la misma vía.
+async function resolverConflicto(r) {
+  const motivo = prompt('En Shop Car ya había otra bandera abierta en esta vía. ¿Por qué no se retiró?');
+  if (!motivo?.trim()) return;
+  try {
+    const abiertas = (await rpc('banderas_abiertas_en_via', { p_localidad: r.localidad, p_via: viaDe(r) })).filter(b => b.id !== r.remotoId);
+    for (const b of abiertas) {
+      try { await rpc('cerrar_bandera_sin_retiro', { p_id: b.id, p_motivo: motivo.trim() }); }
+      catch (err) { if (!/ya no está abierta/.test(err.message)) throw err; }
+    }
+    r.conflicto = false;
+    await guardar(r);
+    await sincronizar(true);
+  } catch (err) { avisar('No se pudo: ' + err.message, 5000); }
+}
 
 let fotoActual = null;
 function verFoto(id, tipo) {
@@ -523,7 +659,6 @@ function descargar(blob, nombre) {
 document.querySelectorAll('.pestanas button').forEach(b => b.addEventListener('click', () => {
   document.querySelectorAll('.pestanas button').forEach(x => x.classList.toggle('activa', x === b));
   document.querySelectorAll('.vista').forEach(v => v.hidden = v.id !== 'vista-' + b.dataset.vista);
-  if (b.dataset.vista === 'ajustes') mostrarEspacio();
 }));
 $('#fDesde').addEventListener('change', pintar);
 $('#fHasta').addEventListener('change', pintar);
@@ -532,67 +667,18 @@ $('#fHasta').addEventListener('change', pintar);
 $('#btnCsv').addEventListener('click', () => {
   const hist = filtrados();
   if (!hist.length) return avisar('No hay registros en el periodo.');
-  const cols = ['Folio', 'Localidad', 'Vía / equipo', 'Fecha colocación', 'Responsable colocación', 'GPS colocación',
-    'Fecha retiro', 'Responsable retiro', 'GPS retiro', 'Tiempo colocada (hh:mm:ss)', 'Minutos', 'Observaciones'];
+  const cols = ['Folio', 'Localidad', 'Vía', 'Equipo', 'Colocó', 'Fecha colocación', 'GPS colocación',
+    'Estado', 'Fecha retiro / cierre', 'Retiró', 'GPS retiro', 'Motivo sin retiro', 'Tiempo colocada (hh:mm:ss)', 'Minutos', 'Observaciones'];
   const gps = g => g ? `${g.lat.toFixed(6)}, ${g.lon.toFixed(6)}` : '';
-  const filas = hist.map(r => [r.folio, r.localidad || '', r.ubicacion, fechaHora(r.colocacion.ms), r.colocacion.responsable, gps(r.colocacion.gps),
-    fechaHora(r.retiro.ms), r.retiro.responsable, gps(r.retiro.gps), duracion(r.duracionMs), (r.duracionMs / 60000).toFixed(1), r.obs]);
+  const filas = hist.map(r => {
+    const ms = finDe(r) - r.colocacion.ms;
+    return [r.folio, r.localidad || '', viaDe(r), r.equipo, colocoDe(r), fechaHora(r.colocacion.ms), gps(r.colocacion.gps),
+      r.retiro ? 'Retirada' : 'Sin retiro', fechaHora(finDe(r)), r.retiro?.responsable, gps(r.retiro?.gps), r.cierre?.motivo,
+      duracion(ms), (ms / 60000).toFixed(1), r.obs];
+  });
   const csv = [cols, ...filas].map(f => f.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
   const d = new Date();
   descargar(new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' }), `banderas_513_${d.getFullYear()}${dos(d.getMonth() + 1)}${dos(d.getDate())}.csv`);
-});
-
-// ---------- Ajustes ----------
-function cargarAjustes() {
-  const a = ajustes();
-  $('#aResponsable').value = a.responsable; $('#aFicha').value = a.ficha; $('#aEmpresa').value = a.empresa;
-  $('#aGps').checked = a.gps; $('#aAlerta').value = a.alertaHoras || '';
-}
-$('#formAjustes').addEventListener('submit', e => {
-  e.preventDefault();
-  localStorage.setItem(AJUSTES_KEY, JSON.stringify({
-    responsable: $('#aResponsable').value.trim(), ficha: $('#aFicha').value.trim(), empresa: $('#aEmpresa').value.trim(),
-    gps: $('#aGps').checked, alertaHoras: parseFloat($('#aAlerta').value) || 0,
-  }));
-  avisadas.clear();
-  avisar('Ajustes guardados.');
-});
-async function mostrarEspacio() {
-  if (!navigator.storage?.estimate) return;
-  const { usage } = await navigator.storage.estimate();
-  $('#espacio').textContent = `Espacio usado: ${(usage / 1048576).toFixed(1)} MB · ${registros.length} registros.`;
-}
-
-// Respaldo: fotos en base64 dentro de un JSON
-const aBase64 = b => new Promise(ok => { const fr = new FileReader(); fr.onload = () => ok(fr.result); fr.readAsDataURL(b); });
-const deBase64 = async s => (await fetch(s)).blob();
-$('#btnRespaldo').addEventListener('click', async () => {
-  avisar('Preparando respaldo…');
-  const datos = await Promise.all(registros.map(async r => {
-    const c = structuredClone({ ...r, colocacion: { ...r.colocacion, foto: null }, retiro: r.retiro && { ...r.retiro, foto: null } });
-    c.colocacion.foto = await aBase64(r.colocacion.foto);
-    if (r.retiro) c.retiro.foto = await aBase64(r.retiro.foto);
-    return c;
-  }));
-  const d = new Date();
-  descargar(new Blob([JSON.stringify({ app: 'bandera513', version: 1, folio: localStorage.getItem(FOLIO_KEY), registros: datos })], { type: 'application/json' }),
-    `respaldo_bandera513_${d.getFullYear()}${dos(d.getMonth() + 1)}${dos(d.getDate())}.json`);
-});
-$('#inRestaurar').addEventListener('change', async e => {
-  const f = e.target.files[0]; e.target.value = '';
-  if (!f) return;
-  try {
-    const j = JSON.parse(await f.text());
-    if (j.app !== 'bandera513') throw new Error('El archivo no es un respaldo de esta app.');
-    for (const r of j.registros) {
-      r.colocacion.foto = await deBase64(r.colocacion.foto);
-      if (r.retiro) r.retiro.foto = await deBase64(r.retiro.foto);
-      await guardar(r);
-    }
-    if (parseInt(j.folio || 0, 10) > parseInt(localStorage.getItem(FOLIO_KEY) || 0, 10)) localStorage.setItem(FOLIO_KEY, j.folio);
-    avisar(`Se restauraron ${j.registros.length} registros.`);
-    pintar();
-  } catch (err) { avisar('No se pudo restaurar: ' + err.message, 5000); }
 });
 
 // ---------- Instalación ----------
@@ -609,7 +695,7 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
 (async () => {
   await abrirDB();
   navigator.storage?.persist?.();
-  cargarAjustes();
+  localStorage.removeItem('bandera513-ajustes'); // la pantalla de Ajustes ya no existe
   mostrarLogin();
   await pintar();
   sincronizar();
